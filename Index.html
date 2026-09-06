@@ -87,7 +87,7 @@ details summary{cursor:pointer;font-weight:900}
 
 <section class="panel" id="setup">
   <b>Nieuw spel</b>
-  <div class="small">Deze versie gebruikt gewone knoppen en event-listeners die goed werken in Safari op iPhone/iPad.</div>
+  <div class="small">Versie 1.2 — zoeken: bij rondpassen wordt maximaal 3 keer troef gedraaid. Een 10 kan ook een eerder gedraaide open kaart ophalen.</div>
   <div class="setup-grid">
     <label>Startkapitaal
       <select id="startCapital">
@@ -246,7 +246,7 @@ function startGame(){
   var cap=parseInt(el("startCapital").value,10),stake=parseInt(el("baseStake").value,10),level=el("aiLevel").value;
   G={players:[],pot:0,round:1,dealer:Math.floor(Math.random()*4),baseStake:stake,startCapital:cap,aiLevel:level,
      phase:"",turn:null,trick:[],lead:null,trickNo:0,upcard:null,trump:null,stock:[],log:[],folded:[false,false,false,false],
-     currentBet:0,acted:[false,false,false,false]};
+     currentBet:0,acted:[false,false,false,false],searchTurn:1,upcardHistory:[]};
   for(var i=0;i<4;i++)G.players.push({chips:cap,hand:[],roundBet:0,asked:false,tricks:[]});
   el("setup").classList.add("hidden");el("game").style.display="block";log("Nieuw spel gestart.");startRound();
 }
@@ -259,7 +259,7 @@ function startRound(){
   G.stock=makeDeck();
   var first=(G.dealer+1)%4,k,n,p;
   for(k=0;k<3;k++)for(n=0;n<4;n++){p=(first+n)%4;G.players[p].hand.push(G.stock.pop())}
-  G.upcard=G.stock.pop();G.trump=SUITS.filter(function(s){return s.s===G.upcard.s})[0];
+  G.upcard=G.stock.pop();G.trump=SUITS.filter(function(s){return s.s===G.upcard.s})[0];G.searchTurn=1;G.upcardHistory=[G.upcard];
   log("Ronde "+G.round+": "+names[G.dealer]+" deelt. Troef is "+G.trump.n+".");
   render();startBetting();
 }
@@ -336,7 +336,10 @@ function aiBet(i){
 }
 function finishBetting(){setControls([]);setMsg("Inzetronde klaar.");later(startBidding,250)}
 function startBidding(){
-  G.phase="bid";G.bidOrder=[];for(var n=1;n<=4;n++)G.bidOrder.push((G.dealer+n)%4);G.bidIndex=0;advanceBid();
+  G.phase="bid";G.bidOrder=[];
+  for(var i=0;i<4;i++){G.players[i].asked=false;if(!G.folded[i])el("status"+i).textContent="";}
+  for(var n=1;n<=4;n++)G.bidOrder.push((G.dealer+n)%4);
+  G.bidIndex=0;advanceBid();
 }
 function advanceBid(){
   if(G.bidIndex>=G.bidOrder.length){finishBid();return}
@@ -354,55 +357,40 @@ function isZwik(i){var h=G.players[i].hand;return h.length===3&&h[0].r===h[1].r&
 function finishBid(){
   setControls([]);G.turn=null;
   var askers=[];for(var i=0;i<4;i++)if(G.players[i].asked&&!G.folded[i])askers.push(i);
-  if(!askers.length){setMsg("Niemand vraagt. De pot blijft staan.");later(endRound,700);return}
+  if(!askers.length){
+    if(G.searchTurn<3&&G.stock.length){
+      G.searchTurn++;G.upcard=G.stock.pop();G.upcardHistory.push(G.upcard);
+      G.trump=SUITS.filter(function(s){return s.s===G.upcard.s})[0];
+      log("Iedereen past. Nieuwe troef "+G.searchTurn+"/3: "+G.trump.n+".");render();later(startBidding,500);return;
+    }
+    setMsg("Iedereen past na 3 troefkaarten. De pot blijft staan.");later(endRound,900);return;
+  }
   var zw=askers.filter(isZwik);
   if(zw.length){zw.sort(function(a,b){return G.players[b].hand[0].o-G.players[a].hand[0].o});awardWinner(zw[0],"ZWIK");return}
   offerTrumpTenSwap();
 }
-function trumpTenIndex(i){
-  for(var j=0;j<G.players[i].hand.length;j++){
-    if(G.players[i].hand[j].s===G.trump.s && G.players[i].hand[j].r==="10") return j;
-  }
-  return -1;
+function availableTenSwaps(i){
+  var out=[],h=G.players[i].hand;
+  for(var u=0;u<G.upcardHistory.length;u++){var open=G.upcardHistory[u];if(!open)continue;
+    for(var j=0;j<h.length;j++)if(h[j].r==="10"&&h[j].s===open.s){out.push({handIndex:j,upIndex:u,open:open,ten:h[j]});break;}
+  }return out;
 }
-function swapTrumpTen(i){
-  var idx=trumpTenIndex(i);
-  if(idx<0 || !G.upcard) return false;
-  var ten=G.players[i].hand[idx];
-  G.players[i].hand[idx]=G.upcard;
-  G.upcard=ten;
-  log(names[i]+" wisselt de troef 10 om voor de open kaart.");
-  render();
-  return true;
+function doHistoricalTenSwap(i,ch){
+  if(!ch)return false;var ten=G.players[i].hand[ch.handIndex],open=G.upcardHistory[ch.upIndex];
+  if(!ten||!open||ten.r!=="10"||ten.s!==open.s)return false;
+  G.players[i].hand[ch.handIndex]=open;G.upcardHistory[ch.upIndex]=ten;
+  if(ch.upIndex===G.upcardHistory.length-1)G.upcard=ten;
+  log(names[i]+" wisselt "+ten.r+ten.s+" om voor "+open.r+open.s+".");render();return true;
 }
+function bestTenSwap(i){var a=availableTenSwaps(i);if(!a.length)return null;a.sort(function(x,y){return y.open.o-x.open.o});return a[0];}
 function offerTrumpTenSwap(){
-  G.phase="swap";G.turn=null;setControls([]);
-  var humanIdx=!G.folded[0]?trumpTenIndex(0):-1;
-  if(humanIdx>=0){
-    setMsg("Je hebt de troef 10. Wil je die inwisselen voor de open troefkaart?");
-    setControls([
-      {label:"10 inwisselen",cls:"primary",fn:function(){swapTrumpTen(0);aiTrumpTenSwaps();startPlay();}},
-      {label:"Niet inwisselen",fn:function(){aiTrumpTenSwaps();startPlay();}}
-    ]);
-    return;
-  }
-  aiTrumpTenSwaps();
-  startPlay();
+  G.phase="swap";G.turn=null;setControls([]);var swaps=!G.folded[0]?availableTenSwaps(0):[];
+  if(swaps.length){var arr=[];swaps.forEach(function(ch){arr.push({label:"10"+ch.ten.s+" → "+ch.open.r+ch.open.s,cls:"primary",fn:function(){doHistoricalTenSwap(0,ch);aiTrumpTenSwaps();startPlay();}});});
+    arr.push({label:"Niet inwisselen",fn:function(){aiTrumpTenSwaps();startPlay();}});
+    setMsg("Je kunt je 10 inwisselen voor een eerder gedraaide open kaart.");setControls(arr);return;}
+  aiTrumpTenSwaps();startPlay();
 }
-function aiTrumpTenSwaps(){
-  for(var i=1;i<4;i++){
-    if(!G.folded[i] && trumpTenIndex(i)>=0) swapTrumpTen(i);
-  }
-}
-function nextActive(from){
-  var a=activePlayers();
-  if(!a.length) return null;
-  for(var step=1;step<=4;step++){
-    var p=(from+step)%4;
-    if(!G.folded[p]) return p;
-  }
-  return a[0];
-}
+function aiTrumpTenSwaps(){for(var i=1;i<4;i++){if(G.folded[i])continue;var ch=bestTenSwap(i);if(ch)doHistoricalTenSwap(i,ch);}}
 function startPlay(){
   G.phase="play";G.trick=[];G.lead=null;G.trickNo=0;
   G.turn=nextActive(G.dealer);
